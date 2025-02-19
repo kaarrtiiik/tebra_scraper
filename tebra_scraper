@@ -1,0 +1,111 @@
+import aiohttp
+import asyncio
+from bs4 import BeautifulSoup
+import json
+import pandas as pd
+
+# Base URL with pagination parameter
+BASE_URL = "https://www.tebra.com/care/search?neighborhood=&city=None&state=None&zip=&lat=&lng=&type=specialty&keyword=Physical+Therapist&lookup=&start={}"
+
+# Headers to mimic a real browser request
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+}
+
+async def fetch_page_data(session, start):
+    url = BASE_URL.format(start)
+    print(f"Fetching page {start} from URL: {url}") # Debugging print
+    async with session.get(url) as response:
+        if response.status != 200:
+            print(f"Failed to fetch page {start} (Status: {response.status})")
+            return None
+        print(f"Page {start} fetched successfully (Status: {response.status})") # Debugging print
+        return await response.text()
+
+async def fetch_phone_number(session, provider_url):
+    if not provider_url or provider_url == "N/A":
+        return "N/A"
+
+    print(f"Fetching phone number from URL: {provider_url}") # Debugging print
+    async with session.get(provider_url) as response:
+        if response.status != 200:
+            print(f"Failed to fetch phone number from {provider_url} (Status: {response.status})")
+            return "N/A"
+
+        soup = BeautifulSoup(await response.text(), "lxml")
+        phone_link = soup.select_one('a[href^="tel:"]')
+        if phone_link:
+            phone = phone_link.text.strip()
+            print(f"Phone number found (link): {phone}") # Debugging print
+            return phone
+
+        phone_button = soup.select_one('button[data-phone]')
+        if phone_button:
+            phone = phone_button["data-phone"].strip()
+            print(f"Phone number found (button): {phone}") # Debugging print
+            return phone
+
+        print(f"Phone number not found on {provider_url}") # Debugging print
+        return "N/A"
+
+async def extract_provider_info(html, session):
+    print("Extracting provider info from page HTML...") # Debugging print
+    soup = BeautifulSoup(html, "lxml")
+    providers = []
+
+    for provider in soup.select("article.search-results__providers-provider"):
+        try:
+            name_tag = provider.select_one(".provider-name")
+            name = name_tag.text.strip() if name_tag else "N/A"
+
+            company_tag = provider.select_one(".provider-specialty")
+            company = company_tag.text.strip() if company_tag else "N/A"
+
+            locations = provider.select(".provider-location")
+            address = [loc.text.strip() for loc in locations if loc and loc.text.strip()] if locations else "N/A"
+
+            website_tag = provider.select_one("a.article-link")
+            website = website_tag["href"] if website_tag else "N/A"
+
+            if website.startswith("/"):
+                website = f"https://www.tebra.com{website}"
+
+            phone = await fetch_phone_number(session, website)
+
+            providers.append({
+                "Provider Name": name,
+                "Company Name": company,
+                "Number of Locations": len(address) if isinstance(address, list) else 0,
+                "Location Address": address,
+                "Phone Number": phone,
+                "Website Link": website
+            })
+        except Exception as e:
+            print(f"Error extracting provider info: {e}")
+
+    print("Provider info extracted from page HTML.") # Debugging print
+    return providers
+
+async def main():
+    print("Starting main function...") # Debugging print
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        tasks = []
+        for start in range(0, 3200, 18):
+            task = asyncio.create_task(fetch_page_data(session, start))
+            tasks.append(task)
+        print("Gathering pages...") # Debugging print
+        pages = await asyncio.gather(*tasks)
+        providers = []
+        print("Processing pages...") # Debugging print
+        for page in pages:
+            if page:
+                providers.extend(await extract_provider_info(page, session))
+        print("Creating DataFrame...") # Debugging print
+        df = pd.DataFrame(providers)
+        print("Saving to JSON...") # Debugging print
+        df.to_json("providers.json", orient="records", indent=4)
+        print("JSON saved to providers.json") # Debugging print
+
+    print("Main function finished.") # Debugging print
+
+asyncio.run(main())
